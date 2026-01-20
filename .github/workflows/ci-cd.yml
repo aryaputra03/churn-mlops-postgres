@@ -126,7 +126,6 @@ jobs:
             --cov-report=term-missing \
             --cov-report=html
 
-      
       - name: Upload coverage to codecov
         uses: codecov/codecov-action@v3
         with:
