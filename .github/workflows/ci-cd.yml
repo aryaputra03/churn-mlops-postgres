@@ -1,5 +1,4 @@
-name: ML CI/CD Pipeline with FastAPI
-
+name: ML CI/CD Pipeline with FastAPI & PostgreSQL
 on:
   push:
     branches: [ main, develop ]
@@ -20,9 +19,12 @@ env:
   DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE }}churn-classifier-api
   PYTHON_VERSION: '3.10'
   NODE_ENV: production
-  SECRET_KEY: test-secret-key-for-ci-only
+  SECRET_KEY: ${{ secrets.SECRET_KEY }}
   TESTING: "true"
   DISABLE_RATE_LIMIT: "true"
+
+  DATABASE_URL: sqlite:///./test_ci.db
+  SKIP_DB_VERIFY: "true"
 
 jobs:
   # ==========================================
@@ -71,7 +73,7 @@ jobs:
         continue-on-error: true
 
   # ==========================================
-  # Job 2: Unit Testing
+  # Job 2: Unit Testing with PostgreSQL Check
   # ==========================================
   test: 
     name: Unit test
@@ -109,11 +111,13 @@ jobs:
         run: |
           python -c "from src.utils import setup_directories, generate_sample_data; setup_directories(); generate_sample_data('data/raw/churn_data.csv', n_samples=500)"
       
-      - name: Run pytest with coverage (excluding rate limit tests)
+      - name: Run pytest (CI mode)
         env:
           TESTING: "true"
           DISABLE_RATE_LIMIT: "true"
-          SECRET_KEY: ${{ env.SECRET_KEY }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          DATABASE_URL: sqlite:///./test_ci.db
+          SKIP_DB_VERIFY: "true"
         run: |
           pytest tests/ -v \
             --ignore=tests/test_rate_limit.py \
@@ -121,6 +125,7 @@ jobs:
             --cov-report=xml \
             --cov-report=term-missing \
             --cov-report=html
+
       
       - name: Upload coverage to codecov
         uses: codecov/codecov-action@v3
@@ -128,7 +133,6 @@ jobs:
           file: ./coverage.xml
           flags: unittest
           name: codecov-${{ matrix.python-version }}
-          fail_ci_if_error: false
       
       - name: Upload coverage HTML
         uses: actions/upload-artifact@v4
@@ -305,6 +309,9 @@ jobs:
           curl -f http://localhost:8000/health || exit 1
           echo "Health check passed"
       
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Test authentication flow
         run: |
           # Register new user
@@ -546,7 +553,7 @@ jobs:
       
       - name: Build & Push API Image
         uses: docker/build-push-action@v5
-        if: env.DOCKER_USERNAME != ''
+        if: secrets.DOCKER_USERNAME != ''
         with:
           context: .
           file: ./docker/Dockerfile.api
@@ -555,9 +562,51 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/churn-classifier-api:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+  
+  # ==========================================
+  # Job 9: PostgreSQL Connection Test (Optional)
+  # ==========================================
+  test-postgres-connection:
+    name: Test Supabase Connection
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install sqlalchemy psycopg2-binary python-dotenv
+      
+      - name: Test Supabase Connection
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SKIP_DB_VERIFY: "false"
+        run: |
+          python -c "
+          from src.api.database import check_db_connection, get_db_info
+          import sys
+          
+          print('Testing Supabase PostgreSQL connection...')
+          info = get_db_info()
+          print(f'Database: {info}')
+          
+          if check_db_connection():
+              print('Supabase connection successful!')
+              sys.exit(0)
+          else:
+              print('Supabase connection failed!')
+              sys.exit(1)
 
   # ==========================================
-  # Job 9: Notification & Status
+  # Job 10: Notification & Status
   # ==========================================
   notify:
     name: Send Notifications
