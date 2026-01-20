@@ -133,12 +133,12 @@ jobs:
           flags: unittest
           name: codecov-${{ matrix.python-version }}
       
-      - name: Upload coverage HTML
-        uses: actions/upload-artifact@v4
-        if: matrix.python-version == '3.10'
-        with:
-          name: coverage-html
-          path: htmlcov/
+      # - name: Upload coverage HTML
+      #   uses: actions/upload-artifact@v4
+      #   if: matrix.python-version == '3.10'
+      #   with:
+      #     name: coverage-html
+      #     path: htmlcov/
 
   # ==========================================
   # Job 3: Authentication Tests
@@ -440,15 +440,17 @@ jobs:
           dvc push || echo "Could not push to remote"
         continue-on-error: true
       
-      - name: Upload pipeline artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-outputs
-          path: |
-            models/*.pkl
-            metrics/metrics.json
-            plots/
-          retention-days: 30
+      # - name: Upload pipeline artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: pipeline-outputs
+      #     path: |
+      #       models/*.pkl
+      #       metrics/metrics.json
+      #       plots/
+      #     retention-days: 30
+      #     if-no-files-found: ignore
+
   
   # ==========================================
   # Job 7: Docker Build & Push
@@ -552,7 +554,9 @@ jobs:
       
       - name: Build & Push API Image
         uses: docker/build-push-action@v5
-        if: secrets.DOCKER_USERNAME != ''
+        if: env.DOCKER_USERNAME != ''
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
         with:
           context: .
           file: ./docker/Dockerfile.api
@@ -561,6 +565,7 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/churn-classifier-api:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
   
   # ==========================================
   # Job 9: PostgreSQL Connection Test (Optional)
