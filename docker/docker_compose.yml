@@ -1,0 +1,217 @@
+version: '3.8'
+
+services:
+  ml-training: 
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: churn-training
+    image: churn-classifier:latest
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../params.yml:/app/params.yml
+      - ../metrics:/app/metrics
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    command: python -m src.train
+    networks:
+      - ml-network
+    restart: on-failure
+
+  ml-preprocess:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: churn-preprocess
+    image: churn-classifier:latest
+    volumes:
+      - ../data:/app/data
+      - ../params.yml:/app/params.yml
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python -m src.preprocess
+    networks:
+      - ml-network
+    restart: on-failure
+
+  ml-evaluate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: churn-evaluate
+    image: churn-classifier:latest
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../params.yml:/app/params.yml
+      - ../metrics:/app/metrics
+      - ../plots:/app/plots
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python -m src.evaluate
+    networks:
+      - ml-network
+    restart: on-failure
+    depends_on:
+      - ml-training
+  
+  ml-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: churn-dev
+    image:  churn-classifier:dev
+    volumes:
+      - ../:/app
+    ports:
+      - "8888:8888"
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - JUPYTER_ENABLE_LAB=yes
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+    networks:
+      - ml-network
+    
+  dvc-pipeline:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: churn-dvc
+    image: churn-classifier:dev
+    volumes:
+      - ../:/app
+    working_dir: /app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DVC_CACHE_DIR=/app/.dvc/cache
+    command: >
+      bash -c "
+      echo 'Initializing DVC pipeline...' &&
+        dvc pull || echo 'No remote data to pull' &&
+        echo 'Running DVC pipeline...' &&
+        dvc repro &&
+        echo 'Pipeline completed!' &&
+        dvc push || echo 'Could not push to remote'
+      "
+    networks:
+      - ml-network
+
+  ml-pipeline-full:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: churn-pipeline-full
+    image: churn-classifier:latest
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../params.yml:/app/params.yml
+      - ../metrics:/app/metrics
+      - ../plots:/app/plots
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+     bash -c "
+        echo 'Step 1: Preprocessing...' &&
+        python -m src.preprocess &&
+        echo 'Step 2: Training...' &&
+        python -m src.train &&
+        echo 'Step 3: Evaluation...' &&
+        python -m src.evaluate &&
+        echo 'Pipeline completed successfully!'
+      "
+    networks:
+      - ml-network
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: churn-postgres
+    environment:
+      - POSTGRES_USER=churn_user
+      - POSTGRES_PASSWORD=churn_password
+      - POSTGRES_DB=churn_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ml-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: churn-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - ml-networks
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: churn-api
+    image: churn-classifier:api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../models:/app/models
+      - ../params.yaml:/app/params.yaml
+      - api-db:/app/db
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=sqlite:///./db/churn_predictions.db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+    networks:
+      - ml-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+    restart: unless-stopped
+  
+  api-postgres:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: churn-api-postgres
+    ports:
+      - "8001:8000"
+    volumes:
+      - ../models:/app/models
+      - ../params.yaml:/app/params.yaml
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://churn_user:churn_password@postgres:5432/churn_db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+    networks:
+      - ml-network
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  api-db:
+
+networks:
+  ml-network:
+    driver: bridge
+    name: ml-network
+

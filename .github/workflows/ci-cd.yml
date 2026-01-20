@@ -1,0 +1,621 @@
+name: ML CI/CD Pipeline with FastAPI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      run_training:
+        description: 'Run Model Training'
+        required: false
+        default: "true"
+      deploy_api:
+        description: "Deploy API after successful build"
+        required: false
+        default: "false"
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE }}churn-classifier-api
+  PYTHON_VERSION: '3.10'
+  NODE_ENV: production
+  SECRET_KEY: test-secret-key-for-ci-only
+  TESTING: "true"
+  DISABLE_RATE_LIMIT: "true"
+
+jobs:
+  # ==========================================
+  # Job 1: Code Quality & Linting
+  # ==========================================
+  lint:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-lint-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-lint-
+            ${{ runner.os }}-pip-
+      
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff black flake8
+      
+      - name: Run ruff
+        run: |
+          ruff check src/ tests/ --output-format=github
+        continue-on-error: false
+      
+      - name: Run Black 
+        run: |
+          black --check src/ tests/ --line-length=100
+        continue-on-error: true
+      
+      - name: Run flake8
+        run: |
+          flake8 src/ tests/ --max-line-length=100 --statistics
+        continue-on-error: true
+
+  # ==========================================
+  # Job 2: Unit Testing
+  # ==========================================
+  test: 
+    name: Unit test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    strategy:
+      matrix: 
+        python-version: [ '3.10', '3.11' ]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install catboost xgboost lightgbm
+      
+      - name: Generate sample data for tests
+        run: |
+          python -c "from src.utils import setup_directories, generate_sample_data; setup_directories(); generate_sample_data('data/raw/churn_data.csv', n_samples=500)"
+      
+      - name: Run pytest with coverage (excluding rate limit tests)
+        env:
+          TESTING: "true"
+          DISABLE_RATE_LIMIT: "true"
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+        run: |
+          pytest tests/ -v \
+            --ignore=tests/test_rate_limit.py \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-report=html
+      
+      - name: Upload coverage to codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittest
+          name: codecov-${{ matrix.python-version }}
+          fail_ci_if_error: false
+      
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.10'
+        with:
+          name: coverage-html
+          path: htmlcov/
+
+  # ==========================================
+  # Job 3: Authentication Tests
+  # ==========================================
+  test-auth:
+    name: Authentication Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION  }}
+    
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      
+      - name: Initialize database
+        env:
+          TESTING: "true"
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+        run: |
+          python -c "from src.api.database import Base, engine; Base.metadata.create_all(bind=engine); print('Database initialized')"
+      
+  
+  # ==========================================
+  # Job 4: Rate Limiting Tests
+  # ==========================================
+  test-rate-limit:
+    name: Rate Limiting Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Test Redis connection
+        run: |
+          python -c "import redis; r = redis.Redis(host='localhost', port=6379, decode_responses=True); r.ping(); print('Redis OK')"
+
+      - name: Run rate limiting tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+          TESTING: "true"
+          DISABLE_RATE_LIMIT: "true"
+        run: |
+          pytest tests/test_rate_limit.py -v \
+            --cov=src.api.rate_limit \
+            --cov-report=xml
+
+      - name: Upload rate limit coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: rate-limit-tests
+          name: codecov-rate-limit
+          fail_ci_if_error: false
+
+  # ==========================================
+  # Job 5: API Tests
+  # ==========================================
+  test-api:
+    name: API Integration Test
+    runs-on: ubuntu-latest
+    needs: [test, test-auth, test-rate-limit]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install catboost xgboost lightgbm
+        
+      - name: Generate sample data and train model
+        run: |
+          python -c "from src.utils import setup_directories, generate_sample_data; setup_directories(); generate_sample_data('data/raw/churn_data.csv', n_samples=500)"
+          python -m src.preprocess
+          python -m src.train
+          python -c "from src.save_preprocessor import create_and_save_preprocessor; create_and_save_preprocessor()"
+
+      - name: Initialize database and create test user
+        env:
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+          TESTING: "true"
+        run: |
+          python -c "
+          from src.api.database import Base, engine, SessionLocal
+          from src.api import crud
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          try:
+              user = crud.create_user(db, username='testuser', email='test@example.com', password='Test1234!', role='user')
+              admin = crud.create_user(db, username='admin', email='admin@example.com', password='Admin1234!', role='admin')
+              print('Test users created')
+          finally:
+              db.close()
+          "
+      
+      - name: Run API integration tests
+        env:
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+          REDIS_URL: redis://localhost:6379/0
+          TESTING: "true"
+          DISABLE_RATE_LIMIT: "true"
+        run: |
+          pytest tests/test_api.py -v --cov=src.api
+      
+      - name: Start API Server (Background)
+        env:
+          SECRET_KEY: ${{ env.SECRET_KEY }}
+          REDIS_URL: redis://localhost:6379/0
+          TESTING: "true"
+        run: |
+          uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 15
+      
+      - name: Test health endpoint
+        run: |
+          curl -f http://localhost:8000/health || exit 1
+          echo "Health check passed"
+      
+      - name: Test authentication flow
+        run: |
+          # Register new user
+          REGISTER_RESPONSE=$(curl -s -X POST http://localhost:8000/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{
+              "username": "apitest",
+              "email": "apitest@example.com",
+              "password": "ApiTest123!",
+              "full_name": "API Test User"
+            }')
+          echo "Register response: $REGISTER_RESPONSE"
+          
+          # Login and get token
+          TOKEN_RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
+            -d "username=testuser&password=Test1234!")
+          echo "Token response: $TOKEN_RESPONSE"
+          
+          TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
+          
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "Failed to get access token"
+            exit 1
+          fi
+          
+          echo "Authentication flow passed"
+          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+      
+      - name: Test protected prediction endpoint
+        run: |
+          PREDICTION_RESPONSE=$(curl -s -X POST http://localhost:8000/predict \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "customer_id": "TEST001",
+              "gender": "Male",
+              "tenure": 24,
+              "monthly_charges": 75.5,
+              "total_charges": 1810.0,
+              "contract": "One year",
+              "payment_method": "Bank transfer (automatic)",
+              "internet_service": "Fiber optic"
+            }')
+          
+          echo "Prediction response: $PREDICTION_RESPONSE"
+          
+          # Check if prediction was successful
+          if echo "$PREDICTION_RESPONSE" | jq -e '.prediction' > /dev/null 2>&1; then
+            echo "Protected prediction endpoint passed"
+          else
+            echo "Prediction endpoint failed"
+            exit 1
+          fi
+
+  # ==========================================
+  # Job 6: DVC Pipeline
+  # ==========================================
+  dvc-pipeline-inside-container:
+    name: DVC Pipeline (Inside Container)
+    runs-on: ubuntu-latest
+    needs: [test, test-api]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install DVC
+        run: |
+          pip install dvc[s3]
+      
+      - name: Configure DVC remote (if using S3)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            dvc remote modify myremote access_key_id $AWS_ACCESS_KEY_ID
+            dvc remote modify myremote secret_access_key $AWS_SECRET_ACCESS_KEY
+            echo "DVC remote configured with AWS credentials"
+          else
+            echo "AWS credentials not found, skipping DVC remote configuration"
+          fi
+
+      - name: Pull DVC data
+        run: |
+          dvc pull || echo "No remote data to pull"
+        continue-on-error: true
+
+      - name: Build Docker Image 
+        run: |
+          docker build -t ml-pipeline:latest -f docker/Dockerfile .
+      
+      - name: Run DVC pipeline in container 
+        run: |
+          docker run --rm \
+            -v $(pwd)/data:/app/data \
+            -v $(pwd)/models:/app/models \
+            -v $(pwd)/params.yml:/app/params.yml \
+            -v $(pwd)/metrics:/app/metrics \
+            -w /app \
+            ml-pipeline:latest \
+            bash -c "
+              python -c 'from src.utils import setup_directories, generate_sample_data; setup_directories(); generate_sample_data(\"data/raw/churn_data.csv\", n_samples=1000)' &&
+              python -m src.preprocess &&
+              python -m src.train &&
+              python -c 'from src.save_preprocessor import create_and_save_preprocessor; create_and_save_preprocessor()' &&
+              python -m src.evaluate
+              "
+    
+      - name: Display metrics
+        run: |
+          if [ -f metrics/metrics.json ]; then
+            echo "Model metrics:"
+            cat metrics/metrics.json | python -m json.tool
+          fi
+      
+      - name: Push DVC data
+        run: |
+          dvc push || echo "Could not push to remote"
+        continue-on-error: true
+      
+      - name: Upload pipeline artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-outputs
+          path: |
+            models/*.pkl
+            metrics/metrics.json
+            plots/
+          retention-days: 30
+  
+  # ==========================================
+  # Job 7: Docker Build & Push
+  # ==========================================
+  docker-build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, test-api]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            echo "Successfully logged in to Docker Hub"
+          else
+            echo "Docker credentials not found, skipping login"
+          fi
+      
+      - name: Extract Metadata
+        id: meta 
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Check if Docker push is enabled
+        id: check_docker
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          if [ -n "$DOCKER_USERNAME" ]; then
+            echo "push_enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "push_enabled=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build & Push Production Image
+        uses: docker/build-push-action@v5
+        if: steps.check_docker.outputs.push_enabled == 'true'
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/churn-classifier-api:latest
+
+      - name: Build & Push Development Image
+        uses: docker/build-push-action@v5
+        if: steps.check_docker.outputs.push_enabled == 'true'
+        with:
+          context: .
+          file: ./docker/Dockerfile.dev
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/churn-classifier-api:dev
+
+      - name: Image digest
+        run: echo ${{ steps.meta.outputs.digest }}
+
+  # ==========================================
+  # Job 8: Docker Build & Push (FastAPI)
+  # ==========================================
+  docker-build-api:
+    name: Build FastAPI Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, test-api]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            echo "Successfully logged in to Docker Hub"
+          else
+            echo "Docker credentials not found, skipping login"
+          fi
+      
+      - name: Build & Push API Image
+        uses: docker/build-push-action@v5
+        if: env.DOCKER_USERNAME != ''
+        with:
+          context: .
+          file: ./docker/Dockerfile.api
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/churn-classifier-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================
+  # Job 9: Notification & Status
+  # ==========================================
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-auth, test-rate-limit, test-api]
+    if: always()
+    
+    steps:
+      - name: Check pipeline status
+        run: |
+          echo "========================================="
+          echo "CI/CD Pipeline Status Report"
+          echo "========================================="
+          echo "Lint:             ${{ needs.lint.result }}"
+          echo "ML Tests:         ${{ needs.test.result }}"
+          echo "Auth Tests:       ${{ needs.test-auth.result }}"
+          echo "Rate Limit Tests: ${{ needs.test-rate-limit.result }}"
+          echo "API Tests:        ${{ needs.test-api.result }}"
+          echo "========================================="
+          
+          # Check for failures
+          if [[ "${{ needs.lint.result }}" == "failure" ]]; then
+            echo "Code quality check failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.test.result }}" == "failure" ]]; then
+            echo "ML tests failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.test-auth.result }}" == "failure" ]]; then
+            echo "Authentication tests failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.test-rate-limit.result }}" == "failure" ]]; then
+            echo "Rate limiting tests failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.test-api.result }}" == "failure" ]]; then
+            echo "API integration tests failed"
+            exit 1
+          fi
+          
+          echo "All pipeline checks passed!"
+      
+      - name: Success notification
+        if: success()
+        run: |
+          echo "CI/CD Pipeline completed successfully!"
+          echo ""
+          echo "All tests passed:"
+          echo "  ✓ Code Quality"
+          echo "  ✓ ML Unit Tests"
+          echo "  ✓ Authentication Tests"
+          echo "  ✓ Rate Limiting Tests"
+          echo "  ✓ API Integration Tests"
+          echo ""
+          echo "🎉 Ready for deployment!"

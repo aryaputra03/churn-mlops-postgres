@@ -1,0 +1,113 @@
+# Konfigurasi paramter untuk ML pipeline
+
+data:
+  raw_path: "data/raw/churn_data.csv"
+  processed_path: "data/processed/churn_processed.csv"
+  test_size: 0.2
+  random_state: 42
+  val_size: 0.1
+
+preprocess:
+  numerical_features:
+    - tenure
+    - MonthlyCharges
+    - TotalCharges
+  
+  categorical_features:
+    - gender
+    - Contract
+    - PaymentMethod
+    - InternetService
+    - tenure_group
+  
+  target: Churn
+
+  handle_missing: median
+  scale_method: standard
+
+  feature_engineering:
+    create_tenure_bins: true 
+    create_charge_ratio: true
+
+train:
+  model_type: random_forest
+
+  # Hyperparameter
+  n_estimators: 100
+  max_depth: 10
+  min_samples_split: 5
+  min_samples_leaf: 2
+  max_features: sqrt
+  random_state: 42
+  n_jobs: -1
+
+# # Xgboost
+# train:
+#   model_type: xgboost
+#   # Hyperparameter
+#   tree_method: 'gpu_hist'
+#   predictor: 'gpu_predictor'
+#   n_estimators: 500
+#   max_depth: 6
+#   learning_rate: 0.05
+
+# # LightGBM
+# train:
+#   model_type: lightgbm
+#   # Hyperparameter
+#   device: 'gpu'
+#   gpu_platform_id: 0
+#   gpu_device_id: 0
+#   n_estimators: 500
+#   learning_rate: 0.05
+#   num_leaves: 31
+#   max_depth: -1
+
+# # CatBoost
+# train:
+#   model_type: catboost 
+#   # Hyperparameter
+#   task_type: GPU
+#   devices: "0"
+#   iterations: 500
+#   learning_rate: 0.05
+#   depth: 6
+
+evaluate:
+  metrics_path: metrics/metrics.json
+  model_path: models/churn_model.pkl
+
+
+  # Evaluation Thresholds
+  min_accuracy: 0.75
+  min_f1_score: 0.70
+
+  # Output_options
+  save_confusion_matrix: true
+  save_feature_importance: true
+
+predict:
+  batch_size: 1000
+  output_probabilities: true
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 4
+  reload: false
+
+auth:
+  secret_key: ${SECRET_KEY}
+  algorithm: HS256
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 7
+
+rate_limit:
+  enabled: true
+  redis_url: ${REDIS_URL}
+  default_limit: "60/minute"
+
+database:
+  type: sqlite  # or postgresql
+  url: sqlite:///churn_predictions.db
+  

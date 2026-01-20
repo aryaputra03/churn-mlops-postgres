@@ -1,0 +1,7 @@
+[core]
+    remote = myremote
+    autostage = true
+['remote "myremote"']
+    url = D:\AI AND DATA SCIENCE\MLOps\Docker\remote
+['remote "gdrive"']
+    url = gdrive://your-folder-id

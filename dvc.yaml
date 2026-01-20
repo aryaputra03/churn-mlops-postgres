@@ -1,0 +1,59 @@
+stages:
+  generate_data:
+    cmd: python -c "from src.utils import generate_sample_data, setup_directories; setup_directories(); generate_sample_data('data/raw/churn_data.csv', n_samples=1000)"
+    outs:
+      - data/raw/churn_data.csv:
+          cache: true
+          persist: false
+  
+  preprocess:
+    cmd: python -m src.preprocess --config params.yml
+    deps:
+      - data/raw/churn_data.csv
+      - src/preprocess.py
+      - src/config.py
+      - src/utils.py
+      - params.yml
+    params:
+      - preprocess
+      - data.test_size
+      - data.random_state
+    outs:
+    - data/processed/churn_processed.csv:
+        cache: true
+        persist: false
+  
+  train:
+    cmd: python -m src.train --config params.yml
+    deps:
+      - data/processed/churn_processed.csv
+      - src/train.py
+      - src/config.py
+      - params.yml
+    params:
+      - train
+      - data.test_size
+      - data.random_state
+    outs:
+      - models/churn_model.pkl:
+          cache: true
+          persist: true
+  
+  evaluate:
+    cmd: python -m src.evaluate --config params.yml
+    deps:
+      - data/processed/churn_processed.csv
+      - models/churn_model.pkl
+      - src/evaluate.py
+      - src/config.py
+    params:
+      - evaluate
+    metrics:
+      - metrics/metrics.json:
+          cache: false
+    plots:
+      - plots/confusion_matrix.json:
+          cache: false
+          x: predicted
+          y: actual
+          template: confusion
