@@ -4,6 +4,10 @@ FastAPI Main Application
 REST API for customer churn prediction with database logging.
 Updated to use modern FastAPI lifespan events.
 """
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from contextlib import asynccontextmanager
 from fastapi import (
     FastAPI, HTTPException, Depends, BackgroundTasks, 
@@ -45,52 +49,41 @@ from src.api.ml_service import MLService
 from src.utils import logger
 from sqlalchemy.orm import Session
 
-from dotenv import load_dotenv
 import os
 from src.api.database import init_db, get_pool_status
 
-load_dotenv()
 # ==========================================
 # Lifespan Event Handler
 # ==========================================
 
-@asynccontextmanager
+ml_service = MLService()
+
 async def lifespan(app: FastAPI):
-    """
-    Lifespan event handler for startup and shutdown
-    
-    Replaces deprecated @app.on_event("startup") and @app.on_event("shutdown")
-    """
     # Startup
     logger.info("Starting Churn Prediction API v2.0...")
     Base.metadata.create_all(bind=engine)
-    logger.info("Database initialized")
-    logger.info("Authentication enabled")
-    logger.info("Rate limiting enabled")
-
+    
     try:
         init_db()
         logger.info("Database initialized")
-
         pool_status = get_pool_status()
         logger.info(f"Connection Pool: {pool_status}")
     except Exception as e:
-        logger.info(f"Database initialization failed: {str(e)}")
+        logger.error(f"Database initialization failed: {str(e)}")
         raise
     
     try:
         ml_service.load_model()
         logger.info("Model loaded successfully")
     except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
-
+        logger.critical(f"Failed to load model: {str(e)}")
+        raise RuntimeError(f"Model loading failed: {str(e)}")
+    
     logger.info("Application started successfully")
-    logger.info("=" * 60)
-
     yield
     
     # Shutdown
-    logger.info("Shutting down Churn Prediction API...")
+    logger.info("Shutting down...")
 
 # ==========================================
 # FastAPI App Initialization
@@ -116,8 +109,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-ml_service = MLService()
 
 # ==========================================
 # Authentication Endpoints
@@ -346,14 +337,18 @@ async def predict_single(
     current_user: schemas.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Predict churn for a single customer (Protected)
+    # ✅ Lazy loading
+    if not ml_service.is_model_loaded():
+        try:
+            ml_service.load_model()
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Model not available: {str(e)}"
+            )
     
-    Requires authentication. Rate limited to 30 requests per minute.
-    """
     try:
-        input_data = pd.DataFrame([pred_request.model_dump()])
-        
+        input_data = pd.DataFrame([pred_request.dict()])
         prediction, probability = ml_service.predict(input_data)
 
         response = PredictionResponse(
@@ -370,7 +365,7 @@ async def predict_single(
             customer_id=pred_request.customer_id,
             prediction=response.prediction,
             probability=response.churn_probability,
-            input_data=pred_request.model_dump(),
+            input_data=pred_request.dict(),
             user_id=current_user.id
         )
         return response
@@ -398,7 +393,7 @@ async def predict_batch(
 ):
     """Predict churn for multiple customers"""
     try:
-        customer_data = [customer.model_dump() for customer in batch_request.customers]
+        customer_data = [customer.dict() for customer in batch_request.customers]
         input_data = pd.DataFrame(customer_data)
 
         prediction, probabilities = ml_service.predict(input_data)
@@ -420,7 +415,7 @@ async def predict_batch(
                 customer_id=customer.customer_id,
                 prediction=response.prediction,
                 probability=response.churn_probability,
-                input_data=customer.model_dump(),
+                input_data=customer.dict(),
                 user_id=current_user.id
             )
 
@@ -502,15 +497,11 @@ async def reload_model():
     """Reload ML model"""
     try:
         ml_service.load_model()
-        return {
-            "message": "Model reloaded successfully",
-            "timestamp": datetime.utcnow()
-        }
+        logger.info("Model loaded successfully")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to reload model: {str(e)}"
-        )
+        logger.critical(f"Failed to load model: {str(e)}")
+        raise RuntimeError("Model failed to load, shutting down application")
+
 
 
 # ==========================================

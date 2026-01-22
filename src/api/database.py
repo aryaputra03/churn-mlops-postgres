@@ -211,7 +211,6 @@ PostgreSQL (Supabase) setup for production.
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import NullPool
 from typing import Generator
 import os
 from urllib.parse import quote_plus
@@ -503,6 +502,26 @@ def verify_database_setup():
     logger.info("DATABASE READY")
     logger.info("=" * 60)
 
+def get_pool_status():
+    """
+    Get current connection pool status
+    
+    Returns:
+        Dictionary with pool statistics
+    """
+    pool = engine.pool
+    return {
+        "pool_size": pool.size(),
+        "checked_in": pool.checkedin(),
+        "checked_out": pool.checkedout(),
+        "overflow": pool.overflow(),
+        "total_connection": pool.size() + pool.overflow()
+    }
+
+def log_pool_status():
+    """Log connection pool status"""
+    status = get_pool_status()
+    logger.info(f"Connection Pool Status: {status}")
 
 if os.getenv("SKIP_DB_VERIFY") != "true":
     try:

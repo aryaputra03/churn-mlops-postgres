@@ -29,10 +29,6 @@ class MLService:
         self.label_encoders = {}
         self.scaler = None
 
-        try:
-            self.load_model()
-        except Exception as e:
-            logger.warning(f"Could not load model on init: {str(e)}")
     
     def load_model(self, model_path: str = None) -> None:
         """
